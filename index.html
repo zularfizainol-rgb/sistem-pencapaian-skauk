@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistem Data Pencapaian SKAUK</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.263.0/lucide.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Konfigurasi Firebase
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'data-pencapaian-skauk';
+
+        // State Global
+        window.state = {
+            activeView: 'dashboard',
+            user: null,
+            rekodPajsk: [],
+            loading: true,
+            selectedYear: new Date().getFullYear().toString(),
+            searchTerm: '',
+            filterAliran: 'SEMUA',
+            filterKelas: 'SEMUA',
+            editingId: null,
+            formData: {
+                nama: '', noKp: '', aliran: 'Tahun 4', kelas: 'UIAM',
+                bahagian: 'Unit Beruniform', pertandingan: '', 
+                statusPertandingan: 'KPM', peringkat: 'Daerah', pencapaian: 'Penyertaan'
+            }
+        };
+
+        const senaraiBahagian = ["Unit Beruniform", "Kelab & Persatuan", "Sukan & Permainan", "Ko-akademik BM", "Ko-akademik BI", "STEM", "Kesenian / Kebudayaan"];
+        const senaraiPencapaian = ["Penyertaan", "Kelima", "Keempat", "Ketiga", "Naib Johan", "Johan"];
+        const senaraiKelas = ["UIAM", "UM", "USM", "UPM", "UKM", "UTM", "UUM", "UITM", "USIM", "UPSI", "UNISZA"];
+        const senaraiPeringkat = ["Antarabangsa", "Kebangsaan", "Negeri", "Daerah"];
+        const senaraiAliran = ["Tahun 4", "Tahun 5", "Tahun 6"];
+
+        // Fungsi Render Utama
+        window.render = function() {
+            const root = document.getElementById('root');
+            if (window.state.loading) {
+                root.innerHTML = `
+                    <div class="h-screen flex items-center justify-center bg-slate-50">
+                        <div class="flex flex-col items-center gap-4">
+                            <div class="animate-spin text-amber-500"><i data-lucide="loader-2" class="w-12 h-12"></i></div>
+                            <p class="text-slate-400 font-black text-[10px] tracking-widest uppercase">Memuatkan Data...</p>
+                        </div>
+                    </div>`;
+                refreshIcons();
+                return;
+            }
+
+            root.innerHTML = `
+                <div class="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans flex flex-col lg:flex-row">
+                    <!-- Sidebar -->
+                    <nav class="w-full lg:w-72 bg-slate-900 text-white p-6 flex flex-col shadow-2xl z-20 sticky top-0 lg:h-screen">
+                        <div class="flex flex-col gap-6 mb-10 px-2">
+                            <div class="flex items-center gap-3">
+                                <img src="https://i.postimg.cc/x1yzrs3k/IMG-20220901-WA0001(1).jpg" class="w-12 h-12 object-contain bg-white rounded-lg p-0.5" alt="Logo SKAU">
+                                <img src="https://i.postimg.cc/bYsF95Q0/IMG-20220901-WA0002(1).jpg" class="w-12 h-12 object-contain bg-white rounded-lg p-0.5" alt="Logo TS25">
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <div class="bg-amber-500 p-2 rounded-lg shrink-0 text-slate-900"><i data-lucide="trophy" class="w-5 h-5"></i></div>
+                                <h1 class="text-base font-black tracking-tight italic uppercase leading-tight">
+                                    DATA PENCAPAIAN<br/><span class="text-amber-500">SKAUK</span>
+                                </h1>
+                            </div>
+                        </div>
+
+                        <div class="space-y-1 flex-1">
+                            ${renderNavItem('dashboard', 'Dashboard', 'layout-dashboard')}
+                            ${renderNavItem('kemasukan', 'Daftar Baru', 'plus-circle')}
+                            ${renderNavItem('senarai', 'Rekod Murid', 'users')}
+                        </div>
+                        
+                        <div class="mt-auto pt-6 border-t border-white/10 text-[10px] text-slate-500 font-bold uppercase tracking-widest text-center">
+                            Sistem Versi 2.4
+                        </div>
+                    </nav>
+
+                    <!-- Main Content -->
+                    <main class="flex-1 p-4 md:p-8 lg:h-screen lg:overflow-y-auto">
+                        ${window.state.activeView === 'dashboard' ? renderDashboard() : ''}
+                        ${window.state.activeView === 'kemasukan' ? renderForm() : ''}
+                        ${window.state.activeView === 'senarai' ? renderList() : ''}
+                    </main>
+                </div>
+            `;
+            refreshIcons();
+        };
+
+        function refreshIcons() {
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+        }
+
+        function renderNavItem(id, label, icon) {
+            const active = window.state.activeView === id;
+            return `
+                <button onclick="window.switchView('${id}')" class="w-full flex items-center gap-4 px-4 py-4 rounded-xl transition-all ${active ? 'bg-amber-500 text-slate-900 font-black shadow-lg shadow-amber-500/20' : 'text-slate-400 hover:bg-white/5'}">
+                    <i data-lucide="${icon}" class="w-5 h-5"></i>
+                    <span class="text-sm font-semibold">${label}</span>
+                </button>
+            `;
+        }
+
+        function renderDashboard() {
+            const filtered = window.state.rekodPajsk.filter(r => r.tahunKalendar === window.state.selectedYear);
+            
+            const statsBahagian = {};
+            senaraiBahagian.forEach(b => statsBahagian[b] = 0);
+            filtered.forEach(r => { if(statsBahagian[r.bahagian] !== undefined) statsBahagian[r.bahagian]++; });
+
+            return `
+                <div class="max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500 pb-12">
+                    <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <div>
+                            <h2 class="text-3xl font-black text-slate-800 uppercase italic">Dashboard Analisis</h2>
+                            <p class="text-slate-500 font-bold text-xs tracking-widest uppercase">Statistik Keseluruhan Sesi ${window.state.selectedYear}</p>
+                        </div>
+                        <select onchange="window.changeYear(this.value)" class="bg-white border-2 border-slate-200 px-6 py-3 rounded-2xl font-black outline-none focus:border-amber-500 shadow-sm cursor-pointer">
+                            <option value="2024" ${window.state.selectedYear === '2024' ? 'selected' : ''}>SESI 2024/25</option>
+                            <option value="2025" ${window.state.selectedYear === '2025' ? 'selected' : ''}>SESI 2025/26</option>
+                            <option value="2026" ${window.state.selectedYear === '2026' ? 'selected' : ''}>SESI 2026/27</option>
+                        </select>
+                    </div>
+
+                    <!-- Summary Cards -->
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                        <div class="bg-slate-900 rounded-[40px] p-8 text-white shadow-2xl relative overflow-hidden flex flex-col justify-between h-64">
+                            <div class="relative z-10">
+                                <p class="text-amber-500 font-black text-[10px] uppercase tracking-widest mb-2">Jumlah Keseluruhan</p>
+                                <h3 class="text-7xl font-black italic tracking-tighter">${filtered.length}</h3>
+                                <p class="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-2">Pencapaian Berdaftar</p>
+                            </div>
+                            <i data-lucide="award" class="absolute -bottom-6 -right-6 w-40 h-40 text-white/5"></i>
+                        </div>
+
+                        <div class="md:col-span-3 grid grid-cols-2 lg:grid-cols-4 gap-4">
+                            ${senaraiPeringkat.map(p => {
+                                const count = filtered.filter(r => r.peringkat === p).length;
+                                return `
+                                    <div class="bg-white rounded-[32px] p-6 border border-slate-100 shadow-sm flex flex-col justify-center">
+                                        <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">${p}</p>
+                                        <h4 class="text-4xl font-black text-slate-800 italic">${count}</h4>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Analisis Peringkat Aliran -->
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        ${senaraiAliran.map(aliran => {
+                            const dataAliran = filtered.filter(r => r.aliran === aliran);
+                            return `
+                                <div class="bg-white rounded-[40px] p-8 border border-slate-100 shadow-sm">
+                                    <div class="flex items-center gap-3 mb-6">
+                                        <div class="p-2 bg-slate-100 rounded-lg text-slate-600"><i data-lucide="graduation-cap" class="w-5 h-5"></i></div>
+                                        <h4 class="text-xs font-black text-slate-800 uppercase tracking-widest">Analisis ${aliran.toUpperCase()}</h4>
+                                    </div>
+                                    <div class="space-y-4">
+                                        ${senaraiPeringkat.map(p => {
+                                            const count = dataAliran.filter(r => r.peringkat === p).length;
+                                            const total = dataAliran.length;
+                                            const percent = total > 0 ? (count / total * 100).toFixed(0) : 0;
+                                            return `
+                                                <div>
+                                                    <div class="flex justify-between text-[10px] font-black uppercase mb-1">
+                                                        <span class="text-slate-500">${p}</span>
+                                                        <span class="text-slate-900">${count}</span>
+                                                    </div>
+                                                    <div class="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                                        <div class="bg-amber-500 h-full transition-all duration-1000" style="width: ${percent}%"></div>
+                                                    </div>
+                                                </div>
+                                            `;
+                                        }).join('')}
+                                        <div class="pt-4 border-t border-slate-50 mt-4 flex justify-between items-center">
+                                            <span class="text-[10px] font-black text-slate-400 uppercase">Jumlah Pencapaian</span>
+                                            <span class="text-xl font-black text-slate-900 italic">${dataAliran.length}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+
+                    <!-- Analisis Bahagian -->
+                    <div class="bg-white rounded-[40px] p-8 border border-slate-100 shadow-sm">
+                        <div class="flex items-center gap-3 mb-8">
+                            <div class="p-2 bg-amber-100 rounded-lg text-amber-600"><i data-lucide="pie-chart" class="w-5 h-5"></i></div>
+                            <h4 class="text-sm font-black text-slate-800 uppercase tracking-widest">Analisis Mengikut Bahagian</h4>
+                        </div>
+                        <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-4">
+                            ${senaraiBahagian.map(b => `
+                                <div class="p-5 rounded-3xl bg-slate-50 border border-slate-100 hover:border-amber-200 transition-colors">
+                                    <div class="text-[8px] font-black text-slate-400 uppercase mb-2 leading-tight h-8">${b}</div>
+                                    <div class="text-2xl font-black text-slate-800">${statsBahagian[b]}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderForm() {
+            const isEditing = window.state.editingId !== null;
+            return `
+                <div class="max-w-4xl mx-auto animate-in slide-in-from-bottom-6 duration-500">
+                    <div class="bg-white p-8 md:p-12 rounded-[48px] shadow-xl border border-slate-100">
+                        <div class="flex justify-between items-center mb-10">
+                            <div>
+                                <h2 class="text-2xl font-black text-slate-800 uppercase italic">${isEditing ? 'Kemaskini Data Murid' : 'Daftar Pencapaian Baru'}</h2>
+                                <p class="text-slate-400 text-[10px] font-bold uppercase tracking-widest mt-1">
+                                    ${isEditing ? 'Sila kemaskini maklumat murid' : 'Isi maklumat pencapaian murid dengan tepat'}
+                                </p>
+                            </div>
+                            <button onclick="window.switchView('senarai')" class="text-slate-300 hover:text-red-500 transition-colors">
+                                <i data-lucide="x" class="w-8 h-8"></i>
+                            </button>
+                        </div>
+                        
+                        <form onsubmit="window.handleFormSubmit(event)" class="space-y-8">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50 p-8 rounded-[32px]">
+                                <div class="md:col-span-2 space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Nama Penuh Murid</label>
+                                    <input required class="w-full p-5 bg-white border-2 border-slate-100 rounded-2xl font-black outline-none focus:border-amber-500" value="${window.state.formData.nama}" oninput="window.updateFormData('nama', this.value.toUpperCase())" placeholder="NAMA PENUH" />
+                                </div>
+                                <div class="md:col-span-2 space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">No. KP / MyKid (Tanpa '-')</label>
+                                    <input class="w-full p-5 bg-white border-2 border-slate-100 rounded-2xl font-black outline-none focus:border-amber-500" value="${window.state.formData.noKp}" oninput="window.updateFormData('noKp', this.value.replace(/\\D/g, ''))" placeholder="CONTOH: 120101101234" maxLength="12" />
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Aliran</label>
+                                    <select class="w-full p-5 bg-white border-2 border-slate-100 rounded-2xl font-black outline-none cursor-pointer" onchange="window.updateFormData('aliran', this.value)">
+                                        ${senaraiAliran.map(a => `<option value="${a}" ${window.state.formData.aliran === a ? 'selected' : ''}>${a}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Kelas</label>
+                                    <select class="w-full p-5 bg-white border-2 border-slate-100 rounded-2xl font-black outline-none cursor-pointer" onchange="window.updateFormData('kelas', this.value)">
+                                        ${senaraiKelas.map(k => `<option value="${k}" ${window.state.formData.kelas === k ? 'selected' : ''}>${k}</option>`).join('')}
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 p-2">
+                                <div class="md:col-span-2 space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Bahagian</label>
+                                    <select class="w-full p-5 bg-slate-100 border-2 border-transparent rounded-2xl font-black outline-none cursor-pointer" onchange="window.updateFormData('bahagian', this.value)">
+                                        ${senaraiBahagian.map(b => `<option value="${b}" ${window.state.formData.bahagian === b ? 'selected' : ''}>${b}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="md:col-span-2 space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Nama Aktiviti / Pertandingan</label>
+                                    <input required class="w-full p-5 bg-slate-100 border-2 border-transparent rounded-2xl font-black outline-none focus:border-amber-500" value="${window.state.formData.pertandingan}" oninput="window.updateFormData('pertandingan', this.value.toUpperCase())" placeholder="CONTOH: KEJOHANAN BOLA SEPAK" />
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Peringkat</label>
+                                    <select class="w-full p-5 bg-slate-100 border-2 border-transparent rounded-2xl font-black outline-none cursor-pointer" onchange="window.updateFormData('peringkat', this.value)">
+                                        ${senaraiPeringkat.map(p => `<option value="${p}" ${window.state.formData.peringkat === p ? 'selected' : ''}>${p}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Pencapaian</label>
+                                    <select class="w-full p-5 bg-slate-100 border-2 border-transparent rounded-2xl font-black outline-none cursor-pointer" onchange="window.updateFormData('pencapaian', this.value)">
+                                        ${senaraiPencapaian.map(p => `<option value="${p}" ${window.state.formData.pencapaian === p ? 'selected' : ''}>${p}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="md:col-span-2 space-y-2">
+                                    <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Status Pertandingan</label>
+                                    <select class="w-full p-5 bg-slate-100 border-2 border-transparent rounded-2xl font-black outline-none cursor-pointer" onchange="window.updateFormData('statusPertandingan', this.value)">
+                                        <option value="KPM" ${window.state.formData.statusPertandingan === 'KPM' ? 'selected' : ''}>KPM</option>
+                                        <option value="LUAR KPM" ${window.state.formData.statusPertandingan === 'LUAR KPM' ? 'selected' : ''}>LUAR KPM</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <button type="submit" class="w-full py-6 bg-slate-900 text-amber-500 rounded-[32px] font-black text-lg shadow-xl hover:bg-slate-800 flex items-center justify-center gap-3 transition-all active:scale-95">
+                                <i data-lucide="save" class="w-6 h-6"></i>
+                                ${isEditing ? 'SIMPAN PERUBAHAN' : 'SIMPAN REKOD'}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderList() {
+            const filtered = getFilteredData();
+
+            return `
+                <div class="max-w-7xl mx-auto space-y-6 animate-in fade-in duration-500 pb-20">
+                    <header class="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+                        <div class="flex flex-col xl:flex-row justify-between gap-6 mb-8">
+                            <div>
+                                <h2 class="text-2xl font-black text-slate-800 uppercase italic leading-none">Senarai Rekod Murid</h2>
+                                <p class="text-slate-400 font-bold text-[10px] uppercase tracking-widest mt-2">${filtered.length} Rekod Ditemui (Sesi ${window.state.selectedYear})</p>
+                            </div>
+                            
+                            <div class="relative w-full md:w-96">
+                                <i data-lucide="search" class="absolute left-5 top-1/2 -translate-y-1/2 text-slate-300 w-5 h-5"></i>
+                                <input placeholder="Cari nama, KP atau aktiviti..." oninput="window.state.searchTerm = this.value; window.render();" class="w-full pl-14 pr-6 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold outline-none focus:border-amber-500" value="${window.state.searchTerm}" />
+                            </div>
+                        </div>
+
+                        <div class="flex flex-col lg:flex-row gap-4 items-center justify-between pt-6 border-t border-slate-50">
+                            <div class="flex flex-wrap gap-4 w-full lg:w-auto">
+                                <select onchange="window.state.filterAliran = this.value; window.render();" class="bg-slate-50 border border-slate-200 px-4 py-3 rounded-xl font-bold text-xs outline-none focus:border-amber-500 min-w-[140px] cursor-pointer">
+                                    <option value="SEMUA">SEMUA ALIRAN</option>
+                                    ${senaraiAliran.map(a => `<option value="${a}" ${window.state.filterAliran === a ? 'selected' : ''}>${a.toUpperCase()}</option>`).join('')}
+                                </select>
+                                <select onchange="window.state.filterKelas = this.value; window.render();" class="bg-slate-50 border border-slate-200 px-4 py-3 rounded-xl font-bold text-xs outline-none focus:border-amber-500 min-w-[140px] cursor-pointer">
+                                    <option value="SEMUA">SEMUA KELAS</option>
+                                    ${senaraiKelas.map(k => `<option value="${k}" ${window.state.filterKelas === k ? 'selected' : ''}>KELAS ${k}</option>`).join('')}
+                                </select>
+                            </div>
+
+                            <div class="flex gap-2 w-full lg:w-auto">
+                                <button onclick="window.exportExcel()" class="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-emerald-50 text-emerald-700 px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-emerald-100">
+                                    <i data-lucide="file-spreadsheet" class="w-4 h-4"></i> EXCEL
+                                </button>
+                                <button onclick="window.exportPDF()" class="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-rose-50 text-rose-700 px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-rose-100">
+                                    <i data-lucide="file-text" class="w-4 h-4"></i> PDF
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div class="bg-white rounded-[40px] shadow-xl border border-slate-100 overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left border-collapse">
+                                <thead class="bg-slate-50 text-[10px] font-black uppercase text-slate-400 border-b">
+                                    <tr>
+                                        <th class="px-10 py-6">Profil Murid</th>
+                                        <th class="px-8 py-6">Maklumat Aktiviti</th>
+                                        <th class="px-8 py-6">Pencapaian</th>
+                                        <th class="px-10 py-6 text-right">Aksi Guru</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-50">
+                                    ${filtered.length === 0 ? `<tr><td colspan="4" class="py-20 text-center text-slate-300 font-black uppercase italic tracking-widest">Tiada rekod</td></tr>` : filtered.map(r => `
+                                        <tr class="hover:bg-slate-50 transition-colors group">
+                                            <td class="px-10 py-6">
+                                                <div class="font-black text-slate-800 text-xs uppercase mb-1">${r.nama}</div>
+                                                <div class="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">KP: ${r.noKp || '-'}</div>
+                                                <div class="mt-1 flex gap-2">
+                                                    <span class="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[8px] font-black uppercase">${r.aliran}</span>
+                                                    <span class="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[8px] font-black uppercase">${r.kelas}</span>
+                                                </div>
+                                            </td>
+                                            <td class="px-8 py-6">
+                                                <div class="font-bold text-slate-700 text-xs mb-1 uppercase">${r.pertandingan}</div>
+                                                <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest flex flex-wrap gap-2 items-center">
+                                                    <span>${r.bahagian}</span>
+                                                    <span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[8px] font-black">${r.statusPertandingan || 'KPM'}</span>
+                                                </div>
+                                            </td>
+                                            <td class="px-8 py-6">
+                                                <div class="font-black text-[10px] text-slate-900 uppercase italic mb-1">${r.peringkat}</div>
+                                                <div class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">${r.pencapaian}</div>
+                                            </td>
+                                            <td class="px-10 py-6 text-right">
+                                                <div class="flex justify-end items-center gap-1">
+                                                    <button onclick="window.editRekod('${r.id}')" class="p-3 bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white rounded-xl transition-all flex items-center gap-2">
+                                                        <i data-lucide="edit-3" class="w-4 h-4"></i>
+                                                        <span class="text-[9px] font-black uppercase">Edit</span>
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- Logik Data ---
+        
+        window.getFilteredData = function() {
+            return window.state.rekodPajsk.filter(r => {
+                const matchesYear = r.tahunKalendar === window.state.selectedYear;
+                const matchesSearch = (r.nama || '').toLowerCase().includes(window.state.searchTerm.toLowerCase()) || 
+                                    (r.pertandingan || '').toLowerCase().includes(window.state.searchTerm.toLowerCase()) ||
+                                    (r.noKp || '').includes(window.state.searchTerm);
+                const matchesAliran = window.state.filterAliran === 'SEMUA' || r.aliran === window.state.filterAliran;
+                const matchesKelas = window.state.filterKelas === 'SEMUA' || r.kelas === window.state.filterKelas;
+                return matchesYear && matchesSearch && matchesAliran && matchesKelas;
+            });
+        };
+
+        window.switchView = function(view) {
+            window.state.activeView = view;
+            if (view !== 'kemasukan') {
+                window.state.editingId = null;
+                resetFormData();
+            }
+            window.render();
+        };
+
+        window.updateFormData = function(key, val) {
+            window.state.formData[key] = val;
+        };
+
+        window.changeYear = function(val) {
+            window.state.selectedYear = val;
+            window.render();
+        };
+
+        function resetFormData() {
+            window.state.formData = {
+                nama: '', noKp: '', aliran: 'Tahun 4', kelas: 'UIAM',
+                bahagian: 'Unit Beruniform', pertandingan: '', 
+                statusPertandingan: 'KPM', peringkat: 'Daerah', pencapaian: 'Penyertaan'
+            };
+        }
+
+        window.handleFormSubmit = async function(e) {
+            e.preventDefault();
+            try {
+                const id = window.state.editingId || Date.now().toString();
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'pencapaian', id);
+                
+                await setDoc(docRef, {
+                    ...window.state.formData,
+                    tahunKalendar: window.state.selectedYear,
+                    updatedAt: Date.now()
+                });
+
+                resetFormData();
+                window.state.editingId = null;
+                window.state.activeView = 'senarai';
+                window.render();
+            } catch (err) {
+                console.error("Ralat simpan:", err);
+            }
+        };
+
+        window.editRekod = function(id) {
+            const item = window.state.rekodPajsk.find(r => r.id === id);
+            if (item) {
+                window.state.formData = { ...item };
+                window.state.editingId = id;
+                window.state.activeView = 'kemasukan';
+                window.render();
+            }
+        };
+
+        window.exportExcel = function() {
+            const filtered = getFilteredData();
+            const data = filtered.map((r, i) => ({
+                'BIL': i + 1,
+                'NAMA MURID': r.nama,
+                'NO KP': r.noKp,
+                'ALIRAN': r.aliran,
+                'KELAS': r.kelas,
+                'BAHAGIAN': r.bahagian,
+                'PERTANDINGAN': r.pertandingan,
+                'STATUS': r.statusPertandingan,
+                'PERINGKAT': r.peringkat,
+                'PENCAPAIAN': r.pencapaian
+            }));
+            const ws = XLSX.utils.json_to_sheet(data);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Data");
+            XLSX.writeFile(wb, `REKOD_SKAUK_${window.state.selectedYear}.xlsx`);
+        };
+
+        window.exportPDF = function() {
+            const { jsPDF } = window.jspdf;
+            const docPdf = new jsPDF('l', 'mm', 'a4');
+            const filtered = getFilteredData();
+            docPdf.setFontSize(14).text(`LAPORAN PENCAPAIAN SKAUK ${window.state.selectedYear}`, 14, 15);
+            const body = filtered.map((r, i) => [i + 1, r.nama, `${r.aliran}/${r.kelas}`, r.bahagian, r.pertandingan, r.peringkat, r.pencapaian]);
+            docPdf.autoTable({
+                startY: 20,
+                head: [['BIL', 'NAMA', 'KELAS', 'BAHAGIAN', 'AKTIVITI', 'PERINGKAT', 'PENCAPAIAN']],
+                body: body,
+                theme: 'grid',
+                headStyles: { fillColor: [15, 23, 42] }
+            });
+            docPdf.save(`LAPORAN_SKAUK_${window.state.selectedYear}.pdf`);
+        };
+
+        // Permulaan Firestore
+        const init = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    window.state.user = user;
+                    if (user) {
+                        const q = collection(db, 'artifacts', appId, 'public', 'data', 'pencapaian');
+                        onSnapshot(q, (snap) => {
+                            window.state.rekodPajsk = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                            window.state.loading = false;
+                            window.render();
+                        }, (err) => {
+                            console.error("Firestore Listen Error:", err);
+                            window.state.loading = false;
+                            window.render();
+                        });
+                    }
+                });
+            } catch (err) {
+                console.error("Auth Error:", err);
+                window.state.loading = false;
+                window.render();
+            }
+        };
+
+        window.onload = init;
+    </script>
+</head>
+<body class="antialiased selection:bg-amber-100">
+    <div id="root"></div>
+</body>
+</html>
